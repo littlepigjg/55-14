@@ -2,15 +2,17 @@ from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QFormLayout, QLineEdit,
     QTextEdit, QPushButton, QGroupBox, QLabel, QListWidget,
     QDialog, QDialogButtonBox, QMessageBox, QCheckBox, QSplitter,
-    QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar
+    QTableWidget, QTableWidgetItem, QHeaderView, QProgressBar, QTabWidget
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 
 from ..models import BookMeta
+from .find_replace_panel import FindReplacePanel
 
 
 class MetadataEditPanel(QWidget):
     save_requested = pyqtSignal(list, dict)
+    replace_executed = pyqtSignal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -20,6 +22,16 @@ class MetadataEditPanel(QWidget):
     def _init_ui(self):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+
+        self.tabs.addTab(self._create_metadata_tab(), "📝 元数据编辑")
+        self.tabs.addTab(self._create_find_replace_tab(), "🔄 查找替换")
+
+    def _create_metadata_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
 
         info_label = QLabel("选择书籍后在此编辑元数据")
         info_label.setStyleSheet("font-weight:bold;font-size:13px;color:#555")
@@ -76,9 +88,24 @@ class MetadataEditPanel(QWidget):
 
         layout.addWidget(batch_group)
         layout.addStretch()
+        return widget
+
+    def _create_find_replace_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.find_replace_panel = FindReplacePanel()
+        self.find_replace_panel.replace_executed.connect(self._on_replace_executed)
+        self.find_replace_panel.undo_requested.connect(self._on_undo_or_redo)
+        self.find_replace_panel.redo_requested.connect(self._on_undo_or_redo)
+        layout.addWidget(self.find_replace_panel)
+
+        return widget
 
     def set_books(self, books: list):
         self._books = books
+        self.find_replace_panel.set_books(books)
         if not books:
             self._clear_fields()
             return
@@ -139,3 +166,16 @@ class MetadataEditPanel(QWidget):
                 return
 
         self.save_requested.emit(self._books, changes)
+
+    def _on_replace_executed(self, command):
+        self.replace_executed.emit(command)
+        if self._books:
+            self.set_books(self._books)
+
+    def _on_undo_or_redo(self):
+        if self._books:
+            self.set_books(self._books)
+
+    @property
+    def find_replace_history(self):
+        return self.find_replace_panel.history

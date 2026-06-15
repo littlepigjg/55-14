@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
 
         self.edit_panel = MetadataEditPanel()
         self.edit_panel.save_requested.connect(self._on_save_metadata)
+        self.edit_panel.replace_executed.connect(self._on_replace_executed)
         splitter.addWidget(self.edit_panel)
 
         splitter.setStretchFactor(0, 3)
@@ -131,6 +132,28 @@ class MainWindow(QMainWindow):
         file_menu.addAction(exit_action)
 
         edit_menu = menubar.addMenu("编辑(&E)")
+
+        self.undo_action = QAction("↩️ 撤销", self)
+        self.undo_action.setShortcut("Ctrl+Z")
+        self.undo_action.triggered.connect(self._on_undo)
+        self.undo_action.setEnabled(False)
+        edit_menu.addAction(self.undo_action)
+
+        self.redo_action = QAction("↪️ 重做", self)
+        self.redo_action.setShortcut("Ctrl+Y")
+        self.redo_action.triggered.connect(self._on_redo)
+        self.redo_action.setEnabled(False)
+        edit_menu.addAction(self.redo_action)
+
+        edit_menu.addSeparator()
+
+        find_replace_action = QAction("🔄 查找替换(&R)", self)
+        find_replace_action.setShortcut("Ctrl+H")
+        find_replace_action.triggered.connect(self._on_find_replace)
+        edit_menu.addAction(find_replace_action)
+
+        edit_menu.addSeparator()
+
         batch_edit_action = QAction("批量编辑(&B)", self)
         batch_edit_action.triggered.connect(lambda: self._on_edit_requested(self.book_table.get_selected_books()))
         edit_menu.addAction(batch_edit_action)
@@ -271,11 +294,61 @@ class MainWindow(QMainWindow):
                 "并确保 ebook-convert 在系统 PATH 中。"
             )
 
+    def _on_replace_executed(self, command):
+        self.book_table.load_books(self._books)
+        self._update_undo_redo_actions()
+        total = command.total_matches
+        books = len(command.affected_books)
+        self.statusBar().showMessage(f"替换完成: {total} 处修改, 涉及 {books} 本书")
+
+    def _update_undo_redo_actions(self):
+        history = self.edit_panel.find_replace_history
+        self.undo_action.setEnabled(history.can_undo())
+        self.undo_action.setText(history.undo_description())
+        self.redo_action.setEnabled(history.can_redo())
+        self.redo_action.setText(history.redo_description())
+
+    def _on_undo(self):
+        history = self.edit_panel.find_replace_history
+        command = history.undo()
+        if command:
+            self.book_table.load_books(self._books)
+            selected = self.book_table.get_selected_books()
+            self.edit_panel.set_books(selected)
+            self._update_undo_redo_actions()
+            self.statusBar().showMessage(f"已撤销: {command.description}")
+
+    def _on_redo(self):
+        history = self.edit_panel.find_replace_history
+        command = history.redo()
+        if command:
+            self.book_table.load_books(self._books)
+            selected = self.book_table.get_selected_books()
+            self.edit_panel.set_books(selected)
+            self._update_undo_redo_actions()
+            self.statusBar().showMessage(f"已重做: {command.description}")
+
+    def _on_find_replace(self):
+        self.edit_panel.tabs.setCurrentIndex(1)
+        selected = self.book_table.get_selected_books()
+        if selected:
+            self.edit_panel.set_books(selected)
+
     def _show_about(self):
         QMessageBox.about(
             self, "关于",
             "📚 电子书元数据管理器 v1.0\n\n"
             "支持 EPUB/MOBI/PDF 元数据编辑与格式转换\n"
+            "新增功能: 古籍OCR纠错批量查找替换工具\n"
+            "  - 正则表达式高级模式（支持 \\b整词匹配）\n"
+            "  - 跨字段搜索（标题、简介等）\n"
+            "  - 替换前预览高亮\n"
+            "  - 撤销/重做（命令模式）\n"
+            "  - 常用规则库（OCR纠错、格式统一）\n"
+            "  - 自定义规则保存复用\n"
+            "  - 批量处理进度对话框\n"
+            "  - 正则超时中断保护\n"
+            "  - EPUB结构完整性验证\n"
             "元数据来源: 豆瓣读书、OpenLibrary\n"
             "格式转换依赖: Calibre (ebook-convert)"
         )
