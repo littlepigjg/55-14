@@ -1,18 +1,20 @@
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QProgressBar,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView,
-    QMessageBox, QCheckBox, QDialogButtonBox, QGroupBox,
-    QTextEdit, QSplitter, QListWidget, QListWidgetItem, QAbstractItemView
+    QMessageBox, QDialogButtonBox, QGroupBox,
+    QTextEdit, QSplitter, QWidget
 )
-from PyQt6.QtCore import pyqtSignal, Qt, QThread
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QBrush
 
-from typing import List, Optional, Callable
+from typing import List, Optional
 from pathlib import Path
 
 from ..models import BookMeta
 from ..find_replace_engine import FindReplaceEngine, ReplaceResult
 from ..commands import ReplaceCommand
+from .book_selection_widget import BookSelectionWidget
+from .workers import BatchReplaceWorker
 
 
 FIELD_NAMES = {
@@ -25,134 +27,6 @@ FIELD_NAMES = {
     "description": "简介",
     "tags": "标签",
 }
-
-
-class BatchReplaceWorker(QThread):
-    progress_updated = pyqtSignal(int, int, BookMeta, list)
-    finished_all = pyqtSignal(list)
-    error_occurred = pyqtSignal(str)
-
-    def __init__(
-        self,
-        engine: FindReplaceEngine,
-        books: List[BookMeta],
-        pattern: str,
-        replacement: str,
-        fields: List[str],
-        use_regex: bool,
-        case_sensitive: bool,
-        whole_word: bool,
-        skip_callback: Optional[Callable[[BookMeta], bool]] = None,
-        parent=None,
-    ):
-        super().__init__(parent)
-        self._engine = engine
-        self._books = books
-        self._pattern = pattern
-        self._replacement = replacement
-        self._fields = fields
-        self._use_regex = use_regex
-        self._case_sensitive = case_sensitive
-        self._whole_word = whole_word
-        self._skip_callback = skip_callback
-        self._cancelled = False
-        self._skipped_books = set()
-
-    def cancel(self):
-        self._cancelled = True
-
-    def skip_book(self, book_path: str):
-        self._skipped_books.add(book_path)
-
-    def run(self):
-        all_results = []
-        total = len(self._books)
-
-        for i, book in enumerate(self._books):
-            if self._cancelled:
-                break
-
-            if book.file_path in self._skipped_books:
-                result = ReplaceResult(book=book, field="skipped", skipped=True)
-                all_results.append(result)
-                self.progress_updated.emit(i + 1, total, book, [result])
-                continue
-
-            try:
-                def _skip(b):
-                    if self._skip_callback and self._skip_callback(b):
-                        return True
-                    return b.file_path in self._skipped_books
-
-                results = self._engine.replace_in_book(
-                    book, self._pattern, self._replacement, self._fields,
-                    self._use_regex, self._case_sensitive, self._whole_word
-                )
-                all_results.extend(results)
-                self.progress_updated.emit(i + 1, total, book, results)
-            except Exception as e:
-                result = ReplaceResult(book=book, field="error", error=str(e))
-                all_results.append(result)
-                self.progress_updated.emit(i + 1, total, book, [result])
-
-        self.finished_all.emit(all_results)
-
-
-class BookSelectionWidget(QWidget):
-    def __init__(self, books: List[BookMeta], parent=None):
-        super().__init__(parent)
-        self._books = books
-        self._checkboxes = {}
-        self._init_ui()
-
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-
-        btn_row = QHBoxLayout()
-        self.select_all_btn = QPushButton("全选")
-        self.select_all_btn.clicked.connect(self._select_all)
-        btn_row.addWidget(self.select_all_btn)
-
-        self.deselect_all_btn = QPushButton("全不选")
-        self.deselect_all_btn.clicked.connect(self._deselect_all)
-        btn_row.addWidget(self.deselect_all_btn)
-
-        self.invert_btn = QPushButton("反选")
-        self.invert_btn.clicked.connect(self._invert_selection)
-        btn_row.addWidget(self.invert_btn)
-        btn_row.addStretch()
-        layout.addLayout(btn_row)
-
-        self.list_widget = QListWidget()
-        self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
-        layout.addWidget(self.list_widget)
-
-        for book in self._books:
-            item = QListWidgetItem()
-            self.list_widget.addItem(item)
-
-            cb = QCheckBox(f"{book.title} ({Path(book.file_path).name})")
-            cb.setChecked(True)
-            self._checkboxes[book.file_path] = cb
-            self.list_widget.setItemWidget(item, cb)
-
-    def _select_all(self):
-        for cb in self._checkboxes.values():
-            cb.setChecked(True)
-
-    def _deselect_all(self):
-        for cb in self._checkboxes.values():
-            cb.setChecked(False)
-
-    def _invert_selection(self):
-        for cb in self._checkboxes.values():
-            cb.setChecked(not cb.isChecked())
-
-    def get_selected_books(self) -> List[BookMeta]:
-        return [b for b in self._books if self._checkboxes[b.file_path].isChecked()]
-
-    def is_book_skipped(self, book: BookMeta) -> bool:
-        return not self._checkboxes[book.file_path].isChecked()
 
 
 class BatchReplaceDialog(QDialog):
@@ -184,6 +58,7 @@ class BatchReplaceDialog(QDialog):
         self._results: List[ReplaceResult] = []
         self._worker: Optional[BatchReplaceWorker] = None
         self._command: Optional[ReplaceCommand] = None
+        self._current_book: Optional[BookMeta] = None
 
         self._init_ui()
 
@@ -320,8 +195,6 @@ class BatchReplaceDialog(QDialog):
         self.cancel_btn.setEnabled(True)
         self.button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
 
-        self._current_book = None
-
         self._worker = BatchReplaceWorker(
             engine=self._engine,
             books=selected_books,
@@ -334,13 +207,27 @@ class BatchReplaceDialog(QDialog):
             skip_callback=self.selection_widget.is_book_skipped,
         )
         self._worker.progress_updated.connect(self._on_progress)
+        self._worker.book_started.connect(self._on_book_started)
+        self._worker.book_finished.connect(self._on_book_finished)
         self._worker.finished_all.connect(self._on_finished)
         self._worker.start()
+
+    def _on_book_started(self, current: int, total: int, book: BookMeta):
+        self._current_book = book
+
+    def _on_book_finished(self, current: int, total: int, book: BookMeta):
+        if self._current_book is book:
+            pass
 
     def _on_progress(self, current: int, total: int, book: BookMeta, results: List[ReplaceResult]):
         self._current_book = book
         self.progress_bar.setValue(current)
-        self.status_label.setText(f"处理中 {current}/{total}: {book.title}")
+
+        all_skipped = all(r.skipped for r in results)
+        if all_skipped:
+            self.status_label.setText(f"已跳过 {current}/{total}: {book.title}")
+        else:
+            self.status_label.setText(f"处理完成 {current}/{total}: {book.title}")
 
         for result in results:
             self._add_result_row(result)
@@ -361,7 +248,6 @@ class BatchReplaceDialog(QDialog):
         count_item = QTableWidgetItem(str(result.count) if not result.skipped and not result.error else "—")
         if result.count > 0:
             count_item.setForeground(QBrush(QColor(76, 175, 80)))
-            count_item.setFont(count_item.font())
         self.results_table.setItem(row, 2, count_item)
 
         status_text = "✓ 成功"
@@ -410,7 +296,7 @@ class BatchReplaceDialog(QDialog):
         text += f"字段: {FIELD_NAMES.get(result.field, result.field)}\n\n"
 
         if result.skipped:
-            text += "状态: 已跳过\n"
+            text += "状态: 已跳过（用户请求跳过或未勾选）\n"
         elif result.error:
             text += f"状态: 错误\n{result.error}\n"
         elif result.count == 0:
@@ -428,7 +314,10 @@ class BatchReplaceDialog(QDialog):
     def _on_skip_current(self):
         if self._worker and self._current_book:
             self._worker.skip_book(self._current_book.file_path)
-            self.status_label.setText(f"已请求跳过: {self._current_book.title}")
+            self.status_label.setText(
+                f"已请求跳过: {self._current_book.title}\n"
+                f"（当前处理完毕后立即生效，若已在处理中则丢弃结果）"
+            )
 
     def _on_cancel(self):
         if self._worker:
@@ -446,7 +335,14 @@ class BatchReplaceDialog(QDialog):
         self._all_results = results
 
         total_changes = sum(r.count for r in results if not r.error and not r.skipped)
-        self.status_label.setText(f"处理完成！共修改 {total_changes} 处")
+        total_skipped = sum(1 for r in results if r.skipped)
+
+        if total_skipped > 0:
+            self.status_label.setText(
+                f"处理完成！共修改 {total_changes} 处，跳过 {total_skipped} 处"
+            )
+        else:
+            self.status_label.setText(f"处理完成！共修改 {total_changes} 处")
 
         self.start_btn.setEnabled(True)
         self.selection_widget.setEnabled(True)
@@ -457,13 +353,22 @@ class BatchReplaceDialog(QDialog):
         self.button_box.button(QDialogButtonBox.StandardButton.Ok).setEnabled(has_changes)
 
         if total_changes == 0:
-            QMessageBox.information(self, "完成", "没有找到可替换的内容")
+            if total_skipped > 0:
+                QMessageBox.information(
+                    self, "完成",
+                    f"没有替换内容。共跳过 {total_skipped} 项。"
+                )
+            else:
+                QMessageBox.information(self, "完成", "没有找到可替换的内容")
 
     def _on_apply(self):
         changed_books = []
+        seen = set()
         for r in self._all_results:
             if r.count > 0 and not r.error and not r.skipped:
-                if r.book not in changed_books:
+                key = r.book.file_path or id(r.book)
+                if key not in seen:
+                    seen.add(key)
                     changed_books.append(r.book)
 
         if not changed_books:
