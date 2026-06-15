@@ -62,15 +62,26 @@ class SkipManager:
         self._skipped_paths: set = set()
         self._pre_skip_callback = pre_skip_callback
 
-    def add(self, book_path: str):
+    def skip(self, book_path: str) -> None:
         with self._lock:
             self._skipped_paths.add(book_path)
+
+    def add(self, book_path: str) -> None:
+        self.skip(book_path)
 
     def is_skipped(self, book: BookMeta) -> bool:
         if self._pre_skip_callback and self._pre_skip_callback(book):
             return True
+        if not book.file_path:
+            return False
         with self._lock:
             return book.file_path in self._skipped_paths
+
+    def is_path_skipped(self, book_path: str) -> bool:
+        if not book_path:
+            return False
+        with self._lock:
+            return book_path in self._skipped_paths
 
     def get_skipped_paths(self) -> set:
         with self._lock:
@@ -124,8 +135,12 @@ class BatchReplaceWorker(QThread):
     def is_book_skipped(self, book: BookMeta) -> bool:
         return self._skip_manager.is_skipped(book)
 
+    @staticmethod
+    def _make_skipped_results(book: BookMeta) -> List[ReplaceResult]:
+        return [ReplaceResult(book=book, field="skipped", skipped=True)]
+
     def run(self):
-        all_results = []
+        all_results: List[ReplaceResult] = []
         total = len(self._books)
 
         for i, book in enumerate(self._books):
@@ -133,36 +148,42 @@ class BatchReplaceWorker(QThread):
                 break
 
             self.book_started.emit(i + 1, total, book)
+            book_path = book.file_path
 
             if self._skip_manager.is_skipped(book):
-                result = ReplaceResult(book=book, field="skipped", skipped=True)
-                all_results.append(result)
-                self.progress_updated.emit(i + 1, total, book, [result])
+                emit_results = self._make_skipped_results(book)
+                all_results.extend(emit_results)
+                self.progress_updated.emit(i + 1, total, book, emit_results)
                 self.book_finished.emit(i + 1, total, book)
                 continue
 
+            executed_results = None
+            caught_error = None
             try:
-                results = self._engine.replace_in_book(
+                executed_results = self._engine.replace_in_book(
                     book, self._pattern, self._replacement, self._fields,
                     self._use_regex, self._case_sensitive, self._whole_word
                 )
             except Exception as e:
-                result = ReplaceResult(book=book, field="error", error=str(e))
-                all_results.append(result)
-                self.progress_updated.emit(i + 1, total, book, [result])
-                self.book_finished.emit(i + 1, total, book)
-                continue
+                caught_error = e
 
-            if self._skip_manager.is_skipped(book):
-                for r in results:
-                    r.skipped = True
-                    r.matches = []
-                    r.original_value = ""
-                    r.new_value = ""
-                results = [ReplaceResult(book=book, field="skipped", skipped=True)]
+            if self._skip_manager.is_path_skipped(book_path):
+                if executed_results:
+                    for r in executed_results:
+                        r.matches = []
+                        r.original_value = ""
+                        r.new_value = ""
+                        r.skipped = True
+                        r.error = ""
+                del executed_results
+                emit_results = self._make_skipped_results(book)
+            elif caught_error is not None:
+                emit_results = [ReplaceResult(book=book, field="error", error=str(caught_error))]
+            else:
+                emit_results = list(executed_results) if executed_results else []
 
-            all_results.extend(results)
-            self.progress_updated.emit(i + 1, total, book, results)
+            all_results.extend(emit_results)
+            self.progress_updated.emit(i + 1, total, book, emit_results)
             self.book_finished.emit(i + 1, total, book)
 
         self.finished_all.emit(all_results)

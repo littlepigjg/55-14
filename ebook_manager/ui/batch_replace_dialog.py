@@ -362,11 +362,18 @@ class BatchReplaceDialog(QDialog):
                 QMessageBox.information(self, "完成", "没有找到可替换的内容")
 
     def _on_apply(self):
+        skipped_keys = set()
+        for r in self._all_results:
+            if r.skipped:
+                skipped_keys.add(r.book.file_path or id(r.book))
+
         changed_books = []
         seen = set()
         for r in self._all_results:
+            key = r.book.file_path or id(r.book)
+            if key in skipped_keys:
+                continue
             if r.count > 0 and not r.error and not r.skipped:
-                key = r.book.file_path or id(r.book)
                 if key not in seen:
                     seen.add(key)
                     changed_books.append(r.book)

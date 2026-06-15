@@ -76,10 +76,18 @@ class ReplaceCommand(Command):
         self._create_snapshots()
 
     def _create_snapshots(self) -> None:
+        skipped_books: set = set()
+        for r in self._results:
+            if r.skipped:
+                key = r.book.file_path or id(r.book)
+                skipped_books.add(key)
+
         book_results: Dict[str, List[ReplaceResult]] = {}
         for r in self._results:
+            key = r.book.file_path or id(r.book)
+            if key in skipped_books:
+                continue
             if r.count > 0 and not r.error and not r.skipped:
-                key = r.book.file_path or id(r.book)
                 if key not in book_results:
                     book_results[key] = []
                 book_results[key].append(r)
